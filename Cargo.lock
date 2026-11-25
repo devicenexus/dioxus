@@ -6443,6 +6443,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-hotpatch-app"
+version = "0.0.1"
+dependencies = [
+ "harness-hotpatch-lib",
+]
+
+[[package]]
+name = "harness-hotpatch-dev-only"
+version = "0.0.1"
+dependencies = [
+ "harness-hotpatch-lib",
+]
+
+[[package]]
+name = "harness-hotpatch-lib"
+version = "0.0.1"
+
+[[package]]
 name = "harness-no-dioxus"
 version = "0.0.1"
 dependencies = [

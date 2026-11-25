@@ -1,4 +1,4 @@
-use crate::{BuildTargets, BundleFormat, Cli, Commands, Workspace};
+use crate::{BuildTargets, BundleFormat, Cli, Commands, RustcArgs, Workspace, WorkspaceRustcArgs};
 use anyhow::Result;
 use clap::Parser;
 use futures_util::{stream::FuturesUnordered, StreamExt};
@@ -294,6 +294,61 @@ async fn test_harnesses() {
                 assert_eq!(t.client.features.iter().map(|s| s.as_str()).collect::<HashSet<_>>(), ["dioxus/web", "other"].into_iter().collect::<HashSet<_>>());
                 assert!(t.server.is_none());
             }),
+        // A library edited under `dx serve --hot-patch`, the app that links it, and a crate
+        // that only uses it in tests. The app package also has its own library target, which
+        // is the tip package's library and must be replayed into patches.
+        TestHarnessBuilder::new("harness-hotpatch-lib")
+            .lib("pub fn message() -> &'static str {\n    \"lib\"\n}\n"),
+        TestHarnessBuilder::new("harness-hotpatch-dev-only")
+            .dev_deps(r#"harness-hotpatch-lib = { path = "../harness-hotpatch-lib" }"#),
+        TestHarnessBuilder::new("harness-hotpatch-app")
+            .deps(r#"harness-hotpatch-lib = { path = "../harness-hotpatch-lib" }"#)
+            .lib("pub fn shared() -> &'static str {\n    \"app lib\"\n}\n")
+            .asrt(r#"dx build"#, |targets| async move {
+                let t = targets.unwrap();
+                let req = &t.client;
+
+                // Only crates that link the edited one into the running binary cascade.
+                let dependents = req.workspace_dependents_of("harness_hotpatch_lib");
+                assert!(
+                    dependents.contains(&"harness_hotpatch_app".to_string()),
+                    "the app links the library, so it must cascade: {dependents:?}"
+                );
+                assert!(
+                    !dependents.contains(&"harness_hotpatch_dev_only".to_string()),
+                    "a dev-dependency never links the library into the binary: {dependents:?}"
+                );
+
+                // The tip package's library is replayed after the crates it depends on.
+                let modified: HashSet<String> = ["harness_hotpatch_app", "harness_hotpatch_lib"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                let args = |keys: &[&str]| WorkspaceRustcArgs {
+                    link_args: vec![],
+                    rustc_args: keys
+                        .iter()
+                        .map(|key| (key.to_string(), RustcArgs::default()))
+                        .collect(),
+                };
+                let with_tip_lib = args(&[
+                    "harness_hotpatch_lib.lib",
+                    "harness_hotpatch_app.lib",
+                    "harness_hotpatch_app.bin",
+                ]);
+                assert_eq!(
+                    req.workspace_hotpatch_replay_order(&modified, &with_tip_lib).unwrap(),
+                    vec!["harness_hotpatch_lib", "harness_hotpatch_app"],
+                    "the tip package's library must be replayed into the patch"
+                );
+
+                // A tip package with no library target is still left to the tip build.
+                let bin_only = args(&["harness_hotpatch_lib.lib", "harness_hotpatch_app.bin"]);
+                assert_eq!(
+                    req.workspace_hotpatch_replay_order(&modified, &bin_only).unwrap(),
+                    vec!["harness_hotpatch_lib"],
+                );
+            }),
     ])
     .await;
 }
@@ -302,7 +357,9 @@ async fn test_harnesses() {
 struct TestHarnessBuilder {
     name: String,
     dependencies: String,
+    dev_dependencies: String,
     features: String,
+    library: Option<String>,
     futures: Vec<TestHarnessTestCase>,
 }
 
@@ -317,7 +374,9 @@ impl TestHarnessBuilder {
         Self {
             name: name.into(),
             dependencies: Default::default(),
+            dev_dependencies: Default::default(),
             features: Default::default(),
+            library: None,
             futures: Default::default(),
         }
     }
@@ -325,6 +384,18 @@ impl TestHarnessBuilder {
     /// Add a dependency to the test harness.
     fn deps(mut self, dependencies: impl Into<String>) -> Self {
         writeln!(&mut self.dependencies, "{}", dependencies.into()).unwrap();
+        self
+    }
+
+    /// Add a dev-dependency to the test harness.
+    fn dev_deps(mut self, dependencies: impl Into<String>) -> Self {
+        writeln!(&mut self.dev_dependencies, "{}", dependencies.into()).unwrap();
+        self
+    }
+
+    /// Give the test harness a library target (`src/lib.rs`) beside its `src/main.rs`.
+    fn lib(mut self, contents: impl Into<String>) -> Self {
+        self.library = Some(contents.into());
         self
     }
 
@@ -355,6 +426,12 @@ impl TestHarnessBuilder {
         let name = self.name.clone();
         let dependencies = self.dependencies.clone();
         let features = self.features.clone();
+        // Only emitted when set, so harnesses without dev-dependencies keep their exact manifest.
+        let dev_dependencies = if self.dev_dependencies.is_empty() {
+            String::new()
+        } else {
+            format!("\n[dev-dependencies]\n{}", self.dev_dependencies)
+        };
 
         let test_dir = harness_dir.join(&name);
 
@@ -371,7 +448,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-{dependencies}
+{dependencies}{dev_dependencies}
 
 [features]
 {features}
@@ -397,6 +474,10 @@ fn main() {
         };
 
         std::fs::write(test_dir.join("src/main.rs"), contents).unwrap();
+
+        if let Some(library) = &self.library {
+            std::fs::write(test_dir.join("src/lib.rs"), library).unwrap();
+        }
     }
 
     async fn run(harnesses: Vec<Self>) {

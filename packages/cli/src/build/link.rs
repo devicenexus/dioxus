@@ -610,7 +610,7 @@ impl BuildRequest {
     /// gets compiled separately via `cargo_build` after the replay. The remaining lib
     /// crates are ordered so dependencies compile before dependents (Kahn's algorithm).
     /// Ties are broken lexicographically for determinism.
-    fn workspace_hotpatch_replay_order(
+    pub(crate) fn workspace_hotpatch_replay_order(
         &self,
         modified_crates: &HashSet<String>,
         workspace_rustc_args: &WorkspaceRustcArgs,
