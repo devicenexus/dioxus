@@ -146,7 +146,8 @@ impl BuildRequest {
         // Replay the rustcs for all modified workspace crates. This is not the final tip binary.
         // Note that the final tip might include itself as a lib (lib.rs + main.rs) which gets covered here.
         ctx.profile_phase("Workspace hotpatch replay");
-        let replayed_crates = self.workspace_hotpatch_replay_order(modified_crates)?;
+        let replayed_crates =
+            self.workspace_hotpatch_replay_order(modified_crates, workspace_rustc_args)?;
         tracing::debug!("replaying crates: {replayed_crates:?}");
         for crate_name in &replayed_crates {
             let rustc_args = self
@@ -612,14 +613,24 @@ impl BuildRequest {
     fn workspace_hotpatch_replay_order(
         &self,
         modified_crates: &HashSet<String>,
+        workspace_rustc_args: &WorkspaceRustcArgs,
     ) -> Result<Vec<String>> {
         // Exclude the tip crate — it's compiled separately via cargo_build after replay.
         // Modified crates are tracked by *package* name, which can differ from the bin
         // target name (`tip_crate_name()`), e.g. package `browser` with `[[bin]] name = "blitz"`.
+        //
+        // The tip *package* may also have a library target (`lib.rs` beside `main.rs`). The bin
+        // build that follows recompiles that rlib, but only the bin's own objects go into the
+        // patch, so the library is replayed and linked like any other workspace crate whenever
+        // the fat build captured args for it. Excluding the whole package here left edits to the
+        // tip package's library compiled but never patched in.
         let tip = self.tip_package_name();
+        let tip_has_lib = workspace_rustc_args
+            .rustc_args
+            .contains_key(&format!("{tip}.lib"));
         let crates: HashSet<&String> = modified_crates
             .iter()
-            .filter(|name| **name != tip)
+            .filter(|name| **name != tip || tip_has_lib)
             .collect();
 
         // Build the subgraph: edge A→B means "A must compile before B".
