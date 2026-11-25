@@ -2887,9 +2887,26 @@ impl BuildRequest {
             })
             .collect();
 
+        // Only normal dependency edges carry code into a dependent's artifact. A dev-dependency
+        // edge (a workspace crate's tests or examples using this crate) and a build-dependency
+        // edge (its build script) never link this crate into the binary being patched, and the
+        // fat build captured no rustc args for crates reached only through them, so following
+        // those edges makes the patch fail with "Missing rustc args for replay".
         krates
             .direct_dependents(target_nid)
             .into_iter()
+            .filter(|dep| {
+                matches!(
+                    krates.graph()[dep.edge_id],
+                    krates::Edge::Dep {
+                        kind: krates::DepKind::Normal,
+                        ..
+                    } | krates::Edge::DepFeature {
+                        kind: krates::DepKind::Normal,
+                        ..
+                    }
+                )
+            })
             .filter_map(|dep| {
                 let name = dep.krate.name.replace('-', "_");
                 if workspace_names.contains(&name) {
